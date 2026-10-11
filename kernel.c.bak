@@ -1,0 +1,249 @@
+#include <stdint.h>
+
+#define VGA 0xB8000
+#define W   80
+#define H   25
+
+static volatile uint16_t* const vga = (uint16_t*)VGA;
+static int      row = 0, col = 0;
+static uint8_t  color = 0x07;
+
+static inline void outb(uint16_t p, uint8_t v) {
+    __asm__ volatile("outb %0, %1" :: "a"(v), "Nd"(p));
+}
+static inline uint8_t inb(uint16_t p) {
+    uint8_t v; __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(p)); return v;
+}
+
+extern void idt_init(void);
+
+/* ---------- util string ---------- */
+static int  slen(const char* s){ int n=0; while(s[n]) n++; return n; }
+static int  scmp(const char* a,const char* b){ while(*a&&*a==*b){a++;b++;} return *a-*b; }
+static int  sncmp(const char* a,const char* b,int n){ while(n&&*a&&*a==*b){a++;b++;n--;} return n?*a-*b:0; }
+static int  swith(const char* s,const char* p){ int n=slen(p); return sncmp(s,p,n)==0; }
+
+/* ---------- VGA ---------- */
+static void clear(void){
+    for(int i=0;i<W*H;i++) vga[i] = (color<<8) | ' ';
+    row=col=0;
+}
+static void scroll(void){
+    for(int i=0;i<(H-1)*W;i++) vga[i]=vga[i+W];
+    for(int i=(H-1)*W;i<H*W;i++) vga[i]=(color<<8)|' ';
+    row=H-1; col=0;
+}
+static void putc_(char c){
+    if(c=='\n'){ col=0; row++; }
+    else if(c=='\r'){ col=0; }
+    else {
+        vga[row*W+col] = (color<<8) | (uint8_t)c;
+        if(++col>=W){ col=0; row++; }
+    }
+    if(row>=H) scroll();
+}
+static void puts_(const char* s){ while(*s) putc_(*s++); }
+static void putc_c(char c,uint8_t colr){
+    uint8_t saved=color; color=colr; putc_(c); color=saved;
+}
+static void puts_c(const char* s,uint8_t colr){
+    uint8_t saved=color; color=colr; puts_(s); color=saved;
+}
+static void backspace(void){
+    if(col>0){ col--; vga[row*W+col]=(color<<8)|' '; }
+}
+static void fill_rect(int x,int y,int w,int h,uint8_t colr){
+    for(int j=0;j<h;j++) for(int i=0;i<w;i++)
+        vga[(y+j)*W + (x+i)] = (colr<<8) | ' ';
+}
+static void draw_box(int x,int y,int w,int h,uint8_t fg,uint8_t bg){
+    for(int i=0;i<w;i++){
+        vga[y*W + x+i]         = ((bg<<4)|fg)<<8 | (i==0?0xC9: i==w-1?0xBB:0xCD);
+        vga[(y+h-1)*W + x+i]   = ((bg<<4)|fg)<<8 | (i==0?0xC8: i==w-1?0xBC:0xCD);
+    }
+    for(int j=1;j<h-1;j++){
+        vga[(y+j)*W + x]       = ((bg<<4)|fg)<<8 | 0xBA;
+        vga[(y+j)*W + x+w-1]   = ((bg<<4)|fg)<<8 | 0xBA;
+    }
+}
+
+/* ---------- keyboard ---------- */
+#define KBUF 256
+static volatile char kbuf[KBUF];
+static volatile int  kh=0, kt=0;
+
+static void kbd_push(char c){
+    int nx=(kh+1)%KBUF;
+    if(nx!=kt){ kbuf[kh]=c; kh=nx; }
+}
+static int kbd_pop(void){
+    if(kh==kt) return -1;
+    char c=kbuf[kt]; kt=(kt+1)%KBUF; return (int)(uint8_t)c;
+}
+
+static const char kbd_map[128] = {
+    0, 27,'1','2','3','4','5','6','7','8','9','0','-','=','\b',
+    '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
+    0,'a','s','d','f','g','h','j','k','l',';','\'','`',
+    0,'\\','z','x','c','v','b','n','m',',','.','/',0,
+    '*',0,' ',
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0
+};
+
+static int shift_down = 0;
+static volatile uint32_t ticks = 0;
+
+static void kbd_irq(void){
+    uint8_t sc = inb(0x60);
+    if(sc==0x2A || sc==0x36){ shift_down=1; return; }
+    if(sc==0xAA || sc==0xB6){ shift_down=0; return; }
+    if(sc & 0x80) return;
+    char c = kbd_map[sc & 0x7F];
+    if(c>='a' && c<='z' && shift_down) c -= 32;
+    if(c) kbd_push(c);
+}
+
+/* Dipanggil dari isr.asm */
+void irq_handler(uint32_t* regs){
+    uint32_t n = regs[12];
+    if(n==32){ ticks++; }
+    else if(n==33){ kbd_irq(); }
+    if(n>=40) outb(0xA0,0x20);
+    outb(0x20,0x20);
+}
+
+/* ---------- commands ---------- */
+static void cmd_help(void){
+    puts_c("Commands:\n", 0x0E);
+    puts_("  help      - tampilkan bantuan\n");
+    puts_("  clear     - bersihkan layar\n");
+    puts_("  about     - info OS\n");
+    puts_("  echo TEXT - cetak TEXT\n");
+    puts_("  uptime    - tick timer sejak boot\n");
+    puts_("  mem       - info memori (dummy)\n");
+    puts_("  gui       - masuk GUI mode\n");
+    puts_("  reboot    - reboot via 8042\n");
+    puts_("  halt      - hentikan CPU\n");
+}
+static void cmd_about(void){
+    puts_c("MyOS v0.3\n", 0x0B);
+    puts_("Kernel 32-bit monolitik, boot via Multiboot/GRUB.\n");
+    puts_("Fitur: IDT, PIC remap, IRQ0 timer, IRQ1 keyboard, VGA text, shell.\n");
+}
+static void cmd_mem(void){
+    puts_("Memory map (dummy):\n");
+    puts_("  0x00000000 - 0x0009FFFF  : low memory\n");
+    puts_("  0x000A0000 - 0x000BFFFF  : VGA\n");
+    puts_("  0x00100000 - ...         : kernel loaded at 1MB\n");
+}
+static void reboot(void){
+    while(inb(0x64) & 0x02);
+    outb(0x64, 0xFE);
+}
+static void halt_cpu(void){
+    puts_c("CPU halted. (tekan Ctrl+Alt keluar dari QEMU)\n", 0x0C);
+    for(;;) __asm__ volatile("hlt");
+}
+
+static void gui_mode(void){
+    /* panel "GUI" di text mode */
+    uint8_t bg = 0x10;                 /* biru di atas biru */
+    fill_rect(0,0,W,H,bg);
+    /* title bar */
+    fill_rect(0,0,W,1,0x70);
+    const char* title=" MyOS v0.3  [ GUI Mode ]";
+    for(int i=0; title[i]; i++) vga[i]=(0x70<<8)|(uint8_t)title[i];
+
+    /* jendela dialog */
+    draw_box(6,4,68,16,0x0F,0x10);
+
+    const char* l1="  Welcome to MyOS GUI demo  ";
+    const char* l2="  Ini panel text-mode 80x25.";
+    const char* l3="  Tekan sembarang tombol untuk";
+    const char* l4="  kembali ke shell.";
+    for(int i=0; l1[i]; i++) vga[6*W + 10 + i]  = (0x1F<<8)|(uint8_t)l1[i];
+    for(int i=0; l2[i]; i++) vga[8*W + 10 + i]  = (0x1E<<8)|(uint8_t)l2[i];
+    for(int i=0; l3[i]; i++) vga[10*W + 10 + i] = (0x1E<<8)|(uint8_t)l3[i];
+    for(int i=0; l4[i]; i++) vga[11*W + 10 + i] = (0x1E<<8)|(uint8_t)l4[i];
+
+    /* tombol palsu */
+    fill_rect(20,15,12,1,0x2F); const char* b1="  [ OK ]   ";
+    for(int i=0; b1[i]; i++) vga[15*W + 20 + i] = (0x2F<<8)|(uint8_t)b1[i];
+    fill_rect(40,15,14,1,0x4F); const char* b2=" [ Cancel ]  ";
+    for(int i=0; b2[i]; i++) vga[15*W + 40 + i] = (0x4F<<8)|(uint8_t)b2[i];
+
+    /* tunggu keypress */
+    while(kbd_pop()<0) __asm__ volatile("hlt");
+
+    color=0x07;
+    clear();
+    puts_c("[gui] kembali ke shell\n", 0x0A);
+}
+
+static void run_cmd(char* line){
+    while(*line==' ') line++;
+    if(*line==0) return;
+
+    if(scmp(line,"help")==0)       cmd_help();
+    else if(scmp(line,"clear")==0) clear();
+    else if(scmp(line,"about")==0) cmd_about();
+    else if(scmp(line,"mem")==0)   cmd_mem();
+    else if(scmp(line,"gui")==0)   gui_mode();
+    else if(scmp(line,"reboot")==0){ puts_("Rebooting...\n"); reboot(); }
+    else if(scmp(line,"halt")==0)  halt_cpu();
+    else if(scmp(line,"uptime")==0){
+        char buf[32]; int v=ticks, i=0;
+        if(v==0) buf[i++]='0';
+        else { char tmp[16]; int j=0; while(v){ tmp[j++]='0'+(v%10); v/=10; } while(j) buf[i++]=tmp[--j]; }
+        buf[i]=0;
+        puts_("ticks: "); puts_(buf); putc_('\n');
+    }
+    else if(swith(line,"echo")){
+        const char* p = line + 4;
+        while(*p==' ') p++;
+        puts_(p); putc_('\n');
+    }
+    else {
+        puts_c("Unknown command: ", 0x0C); puts_(line); putc_('\n');
+        puts_("Type 'help'.\n");
+    }
+}
+
+/* ---------- shell ---------- */
+static void shell(void){
+    char line[128];
+    int  len=0;
+    puts_c("> ", 0x0A);
+    for(;;){
+        int c = kbd_pop();
+        if(c<0){ __asm__ volatile("hlt"); continue; }
+        if(c=='\n'){
+            putc_('\n'); line[len]=0;
+            run_cmd(line); len=0;
+            puts_c("> ", 0x0A);
+        } else if(c=='\b'){
+            if(len>0){ len--; backspace(); }
+        } else if(c>=32 && c<127 && len<127){
+            line[len++]=(char)c; putc_((char)c);
+        }
+    }
+}
+
+void kernel_main(uint32_t magic, uint32_t mbi){
+    (void)mbi;
+    clear();
+    puts_c("==============================\n", 0x0B);
+    puts_c("        MyOS v0.3 boot\n", 0x0B);
+    puts_c("==============================\n", 0x0B);
+    if(magic==0x2BADB002) puts_c("[OK] Multiboot/GRUB\n", 0x0A);
+    else                  puts_c("[??] magic invalid\n", 0x0C);
+    puts_("[..] init IDT + PIC + IRQ\n");
+    idt_init();
+    puts_c("[OK] interrupts enabled\n", 0x0A);
+    puts_("\nKetik 'help' untuk daftar command.\n\n");
+    shell();
+}

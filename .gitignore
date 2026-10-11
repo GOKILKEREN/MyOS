@@ -1,0 +1,7 @@
+*.o
+*.elf
+*.iso
+*.bin
+user_build/
+iso/
+user_programs.c

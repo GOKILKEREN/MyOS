@@ -9,6 +9,8 @@ directed by a human; the code is generated and iterated with AI help.
 The goal is not to hide that — it is to show what a solo developer can
 build in a few sessions with the right tools.
 
+![MyOS Desktop](docs/screenshots/desktop.png)
+
 ## Features
 
 - **Bootloader**: GRUB Multiboot, 32-bit ELF

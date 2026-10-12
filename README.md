@@ -85,8 +85,9 @@ Work in progress. Currently supports a functional desktop environment,
 ring 3 user programs, ELF loading, and preemptive multitasking.
 
 Known issues:
-- Exec'ing a user program halts the kernel after exit (will be fixed
-  once scheduler reclaims the kernel task cleanly)
+- Multi-window support is limited to one user application at a time
+- Preemptive scheduler is cooperative for kernel task (user app runs first)
+- No network driver, no persistent storage
 - Some character glyphs not mapped (special symbols)
 
 ## Vibecoding Note
@@ -99,6 +100,22 @@ developer directing the design and validating every step.
 The point is not that "AI wrote an OS". The point is that a determined
 solo developer, with the right tools, can now go from zero to a working
 kernel with user mode and a GUI in a much shorter time than before.
+
+## Update v1.6
+
+**Stage 12a: Interactive Desktop + User Windows**
+
+- Desktop remains responsive while a user-mode application is running
+- User windows can be dragged by the title bar
+- User windows can be closed via the X button
+- Mouse events routed: content area to user app, chrome to kernel
+- Removed the "task 0 sleeps during user app" workaround
+- Fixed: syscall gate now uses trap gate (0xEF) instead of interrupt gate
+  (0xEE), so IRQs are not masked inside the kernel during blocking syscalls
+- Version string updated across kernel, terminal, and info window
+
+Result: a real interactive desktop environment where user apps and the
+kernel window manager coexist.
 
 ## License
 

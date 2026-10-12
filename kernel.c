@@ -56,6 +56,8 @@ static uint32_t  fb_pitch = 0, fb_w = 0, fb_h = 0, fb_bpp = 0;
 /* ===== composition + cache buffers ===== */
 static uint32_t  backbuf[1024*768];
 static uint32_t  wallpaper_buf[1024*768];
+static uint32_t  user_winbuf[800*600];
+static int user_winbuf_w = 0, user_winbuf_h = 0;
 static uint32_t  drag_bg[1024*768];
 static uint32_t  drag_winbuf[1024*768];
 
@@ -199,17 +201,13 @@ static void mouse_handle_byte(uint8_t d){
 
             int nl = mouse_btn & 1;
             if(user_win_active){
-                int relx = mouse_x - user_win_cx;
-                int rely = mouse_y - user_win_cy;
-                if(nl && !irq_last_left){
-                    if(mouse_x >= user_win_close_x && mouse_x < user_win_close_x + 16 &&
-                       mouse_y >= user_win_close_y && mouse_y < user_win_close_y + 14){
-                        ev_push(EV_CLOSE, 0, 0, 0, 0);
-                    } else {
-                        ev_push(EV_MOUSE, relx, rely, 1, 0);
-                    }
-                } else if(!nl && irq_last_left){
-                    ev_push(EV_MOUSE, relx, rely, 0, 0);
+                int in_content = (mouse_x >= user_win_cx && mouse_x < user_win_cx + user_win_cw &&
+                                  mouse_y >= user_win_cy && mouse_y < user_win_cy + user_win_ch);
+                if(in_content){
+                    int relx = mouse_x - user_win_cx;
+                    int rely = mouse_y - user_win_cy;
+                    if(nl && !irq_last_left) ev_push(EV_MOUSE, relx, rely, 1, 0);
+                    else if(!nl && irq_last_left) ev_push(EV_MOUSE, relx, rely, 0, 0);
                 }
             }
             irq_last_left = nl;
@@ -470,7 +468,7 @@ static void fs_init(void){
     for(int i = 0; i < FS_MAX; i++) fs[i].used = 0;
     int i;
     i = fs_create("README.TXT");
-    fs_write(i, "Selamat datang di MyOS v1.5!\n\nFPS boost + smooth drag.", 51);
+    fs_write(i, "Selamat datang di MyOS v1.6!\n\nFPS boost + smooth drag.", 51);
     i = fs_create("NOTES.TXT");
     fs_write(i, "TODO:\n- Heap\n- Paging\n- ATA driver", 31);
     /* auto-register semua user program yang di-embed */
@@ -636,7 +634,7 @@ static void term_run(const char* line){
         term_puts("wallpaper / open APP\n");
     }
     else if(seq(line, "clear")) term_clear();
-    else if(seq(line, "about")) term_puts("MyOS v1.3 - smooth drag\n");
+    else if(seq(line, "about")) term_puts("MyOS v1.6 - smooth drag\n");
     else if(seq(line, "uptime")){ term_puts("up "); term_putint((int)(ticks/tick_hz)); term_puts("s\n"); }
     else if(seq(line, "ticks")){ term_putint((int)ticks); term_putc('\n'); }
     else if(seq(line, "time")){
@@ -915,7 +913,7 @@ static void draw_term_content(void){
 static void draw_info_content(void){
     win_t* w = &wins[0];
     int bx = w->x + 12, by = w->y + TITLE_H + 11;
-    draw_text(bx, by,      "MyOS v1.3",            0x00101010);
+    draw_text(bx, by,      "MyOS v1.6",            0x00101010);
     draw_text(bx, by+22,   "Kernel",               0x00505050);
     draw_text(bx+64, by+22, "monolithic 32-bit",   0x00206080);
     draw_text(bx, by+42,   "Render",               0x00505050);
@@ -1233,6 +1231,8 @@ static void draw_ctx_menu(void){
 }
 
 /* ===== desktop compositor ===== */
+static void user_winbuf_to_backbuf(void);
+
 static void draw_one_window(int i){
     win_t* w = &wins[i];
     if(w->state == 1) return;
@@ -1242,6 +1242,7 @@ static void draw_one_window(int i){
     else if(i == 2) draw_notepad_content();
     else if(i == 3) draw_calc_content();
     else if(i == 4) draw_files_content();
+    else if(i == 5) user_winbuf_to_backbuf();
 }
 static void draw_desktop(void){
     draw_wallpaper();
@@ -1547,6 +1548,9 @@ void kernel_create_user_window(gui_win_req_t* req){
     user_win_cy = w->y + TITLE_H;
     user_win_cw = w->w - 2;
     user_win_ch = w->h - TITLE_H - 1;
+    user_winbuf_w = user_win_cw;
+    user_winbuf_h = user_win_ch;
+    for(int k = 0; k < user_winbuf_w * user_winbuf_h; k++) user_winbuf[k] = 0xFFFFFFFF;
     user_win_close_x = btn_x(w, 0);
     user_win_close_y = btn_y(w);
 
@@ -1570,20 +1574,74 @@ void kernel_destroy_user_window(void){
 }
 void kernel_user_clear(uint32_t color){
     if(!user_win_active) return;
+    set_target(user_winbuf, user_winbuf_w, user_winbuf_h, user_win_cx, user_win_cy);
     fill_rect(user_win_cx, user_win_cy, user_win_cw, user_win_ch, color);
+    clear_target();
 }
 void kernel_user_rect(gui_rect_req_t* r){
     if(!user_win_active) return;
+    set_target(user_winbuf, user_winbuf_w, user_winbuf_h, user_win_cx, user_win_cy);
     fill_rect(user_win_cx + r->x, user_win_cy + r->y, r->w, r->h, r->color);
+    clear_target();
 }
 void kernel_user_text(gui_text_req_t* r){
     if(!user_win_active) return;
+    set_target(user_winbuf, user_winbuf_w, user_winbuf_h, user_win_cx, user_win_cy);
     draw_text(user_win_cx + r->x, user_win_cy + r->y, r->text, r->color);
+    clear_target();
 }
+static void user_winbuf_to_backbuf(void){
+    if(!user_win_active) return;
+    if(user_winbuf_w <= 0 || user_winbuf_h <= 0) return;
+
+    if(target_buf){
+        int wx = user_win_cx - target_ox;
+        int wy = user_win_cy - target_oy;
+        for(int y = 0; y < user_winbuf_h; y++){
+            int ty = wy + y;
+            if(ty < 0 || ty >= target_h) continue;
+            uint32_t* d = &target_buf[ty * target_w];
+            uint32_t* s = &user_winbuf[y * user_winbuf_w];
+            for(int x = 0; x < user_winbuf_w; x++){
+                int tx = wx + x;
+                if(tx < 0 || tx >= target_w) continue;
+                d[tx] = s[x];
+            }
+        }
+        return;
+    }
+
+    for(int y = 0; y < user_winbuf_h; y++){
+        uint32_t* d = &backbuf[(user_win_cy + y) * fb_w + user_win_cx];
+        uint32_t* s = &user_winbuf[y * user_winbuf_w];
+        int n = user_winbuf_w;
+        __asm__ volatile("rep movsl" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
+    }
+}
+
 void kernel_user_flush(void){
     if(!user_win_active) return;
-    blit_full();
-    cursor_transition(-1, -1, mouse_x, mouse_y);
+
+    user_winbuf_to_backbuf();
+
+    int x0 = user_win_cx;
+    int y0 = user_win_cy;
+    int w  = user_winbuf_w;
+    int h  = user_winbuf_h;
+    if(x0 < 0){ w += x0; x0 = 0; }
+    if(y0 < 0){ h += y0; y0 = 0; }
+    if(x0 + w > (int)fb_w) w = (int)fb_w - x0;
+    if(y0 + h > (int)fb_h) h = (int)fb_h - y0;
+    if(w <= 0 || h <= 0) return;
+
+    for(int y = 0; y < h; y++){
+        uint32_t* d = (uint32_t*)(fb + (y0+y)*fb_pitch + x0*4);
+        uint32_t* s = &backbuf[(y0+y)*fb_w + x0];
+        uint32_t n = w;
+        __asm__ volatile("rep movsl" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
+    }
+
+    cursor_transition(cur_sx, cur_sy, mouse_x, mouse_y);
 }
 void kernel_user_wait_event(gui_event_t* out){
     while(ev_head == ev_tail){
@@ -1635,9 +1693,9 @@ void kernel_main(uint32_t magic, uint32_t mbi){
 
     msc_set_output(msc_out);
     term_clear();
-    term_puts("MyOS v1.4 - + scripting engine\n");
+    term_puts("MyOS v1.6 - + scripting engine\n");
     term_puts("Coba: run DEMO.TXT\n\n");
-    term_puts("MyOS v1.3 - smooth drag\n");
+    term_puts("MyOS v1.6 - smooth drag\n");
     term_puts("Ketik 'help'.\n\n> ");
 
     /* STAGE 3: syscall setup + test */
@@ -1697,9 +1755,30 @@ void kernel_main(uint32_t magic, uint32_t mbi){
             int right_edge = right_now && !last_right;
             int release    = !left_now && last_left;
 
-            if(click_edge || right_edge || release) ui_dirty = 1;
+            if(click_edge || right_edge || release){
+                if(user_win_active){
+                    /* user window aktif: cuma full redraw kalau klik di luar user window */
+                    int ux = wins[5].x, uy = wins[5].y, uw = wins[5].w, uh = wins[5].h;
+                    if(mouse_x < ux || mouse_x >= ux+uw || mouse_y < uy || mouse_y >= uy+uh)
+                        ui_dirty = 1;
+                } else {
+                    ui_dirty = 1;
+                }
+            }
 
-            if(click_edge){
+            if(click_edge && user_win_active &&
+               pt_in(mouse_x, mouse_y, wins[5].x, wins[5].y, wins[5].w, wins[5].h)){
+                /* STAGE 12a: user window title bar */
+                if(pt_in(mouse_x, mouse_y, wins[5].x, wins[5].y, wins[5].w, TITLE_H)){
+                    if(pt_in(mouse_x, mouse_y, btn_x(&wins[5], 0), btn_y(&wins[5]), BTN_W, BTN_H)){
+                        ev_push(EV_CLOSE, 0, 0, 0, 0);
+                    } else {
+                        begin_drag(5);
+                    }
+                }
+                ui_dirty = 1;
+            }
+            else if(click_edge){
                 int handled = 0;
                 if(start_open){
                     int th = 36;

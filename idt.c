@@ -47,7 +47,7 @@ void idt_set_user(int n, uint32_t handler){
     idt[n].base_low  = handler & 0xFFFF;
     idt[n].sel       = 0x08;
     idt[n].zero      = 0;
-    idt[n].flags     = 0xEE;   /* present, DPL=3, 32-bit interrupt gate */
+    idt[n].flags     = 0xEF;   /* present, DPL=3, 32-bit trap gate */
     idt[n].base_high = (handler >> 16) & 0xFFFF;
 }
 

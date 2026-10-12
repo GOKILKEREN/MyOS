@@ -5,3 +5,6 @@
 user_build/
 iso/
 user_programs.c
+*.bak
+*.bak12a
+*.bak*
